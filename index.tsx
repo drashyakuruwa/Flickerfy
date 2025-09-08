@@ -404,7 +404,7 @@ const App = () => {
         const initialFrameBase64 = imagePart.inlineData.data;
 
         setLoadingMessage(`Generating animation ideas for "${selectedObject.name}"...`);
-        const prompts = await generatePrompts(selectedObject.name);
+        const prompts = await generatePrompts(selectedObject.name, imagePart);
         
         const subsequentFrames = await generateFrames(imagePart, prompts);
         
@@ -421,71 +421,61 @@ const App = () => {
   };
 
   const detectObjects = async (imagePart) => {
-    const promptText = `Analyze this image and identify up to 5 prominent objects. For each object, provide its name and a normalized bounding box. The bounding box should have 'x', 'y', 'width', and 'height' properties, where 'x' and 'y' represent the top-left corner and all values are floats between 0.0 and 1.0. Return a JSON array of these objects. Example: [{"name": "cat", "boundingBox": {"x": 0.15, "y": 0.22, "width": 0.30, "height": 0.45}}]`;
+    const promptText = `Analyze this image and identify up to 5 prominent objects. For each object, provide its name and a normalized bounding box. The bounding box should have 'x', 'y', 'width', and 'height' properties, where 'x' and 'y' represent the top-left corner and all values are floats between 0.0 and 1.0. CRITICAL: Your entire response must be ONLY the raw JSON array of these objects, without any markdown, comments, or other text. Example: [{"name": "cat", "boundingBox": {"x": 0.15, "y": 0.22, "width": 0.30, "height": 0.45}}]`;
     
     const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-2.5-flash-image-preview',
         contents: {
           parts: [{ text: promptText }, imagePart],
         },
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                name: { type: Type.STRING },
-                boundingBox: {
-                  type: Type.OBJECT,
-                  properties: {
-                    x: { type: Type.NUMBER },
-                    y: { type: Type.NUMBER },
-                    width: { type: Type.NUMBER },
-                    height: { type: Type.NUMBER },
-                  },
-                  required: ['x', 'y', 'width', 'height']
-                },
-              },
-              required: ['name', 'boundingBox']
-            },
-          },
-        },
-      });
-      
-      let parsedResponse;
-      try {
-        parsedResponse = JSON.parse(response.text);
-      } catch (e) {
-        console.error("Failed to parse JSON from detectObjects:", response.text);
-        throw new Error("Received an invalid response from the AI when detecting objects.");
-      }
-
-      if (!Array.isArray(parsedResponse)) {
-        throw new Error("Failed to detect objects in the required format.");
-      }
-      return parsedResponse;
-  };
-
-  const generatePrompts = async (prominentObjectName) => {
-    const prompt = `An image contains '${prominentObjectName}'. Generate a sequence of ${NUM_FRAMES_TO_GENERATE} distinct, incremental prompts to animate ONLY this object. CRITICAL INSTRUCTIONS: 1. Each prompt must describe a very small, subtle, and logical change to '${prominentObjectName}' to create smooth motion. 2. The background and all other elements in the image MUST remain IDENTICAL to the previous frame. Do NOT mention the background. Focus only on the object's change. Return a JSON array of ${NUM_FRAMES_TO_GENERATE} strings.`;
-    const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-        config: {
-            responseMimeType: 'application/json',
-            responseSchema: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-            },
-        }
+        // The gemini-2.5-flash-image-preview model does not support responseSchema, so we must parse the text response.
     });
+      
+    let jsonText = response.text.trim();
+
+    // The model might wrap the JSON in markdown, so we extract it.
+    const jsonMatch = jsonText.match(/```json\n([\s\S]*?)\n```|(\[[\s\S]*?{.*}[\s\S]*?\])/);
+    if (jsonMatch) {
+        jsonText = jsonMatch[1] || jsonMatch[2];
+    }
 
     let parsedResponse;
     try {
-        parsedResponse = JSON.parse(response.text);
+      parsedResponse = JSON.parse(jsonText);
     } catch (e) {
-        console.error("Failed to parse JSON from generatePrompts:", response.text);
+      console.error("Failed to parse JSON from detectObjects:", jsonText, "Original response text:", response.text);
+      throw new Error("Received an invalid response from the AI when detecting objects. Please try a different image.");
+    }
+
+    if (!Array.isArray(parsedResponse)) {
+      throw new Error("Failed to detect objects in the required format.");
+    }
+    return parsedResponse;
+  };
+
+  const generatePrompts = async (prominentObjectName, imagePart) => {
+    const prompt = `Analyze the provided image which contains a '${prominentObjectName}'. Your task is to generate a sequence of ${NUM_FRAMES_TO_GENERATE} distinct, incremental prompts to animate ONLY this object. CRITICAL INSTRUCTIONS: 1. Each prompt must describe a very small, subtle, and logical change to '${prominentObjectName}' to create smooth motion. 2. The background and all other elements in the image MUST remain IDENTICAL to the previous frame. Do NOT mention the background. Focus only on the object's change. 3. Your entire response must be ONLY the raw JSON array of ${NUM_FRAMES_TO_GENERATE} strings, without any markdown, comments, or other text.`;
+    
+    const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash-image-preview',
+        contents: {
+            parts: [{ text: prompt }, imagePart],
+        },
+    });
+
+    let jsonText = response.text.trim();
+
+    // The model might wrap the JSON in markdown, so we extract it.
+    const jsonMatch = jsonText.match(/```json\n([\s\S]*?)\n```|(\[[\s\S]*?\])/);
+    if (jsonMatch) {
+        jsonText = jsonMatch[1] || jsonMatch[2];
+    }
+
+    let parsedResponse;
+    try {
+        parsedResponse = JSON.parse(jsonText);
+    } catch (e) {
+        console.error("Failed to parse JSON from generatePrompts:", jsonText, "Original response text:", response.text);
         throw new Error("Received an invalid response from the AI when generating prompts.");
     }
 
@@ -596,13 +586,7 @@ const App = () => {
     setGifProgress(0);
 
     try {
-        const gif = new GIF({
-            workers: 2,
-            quality: 10,
-            workerScript: gifWorkerUrlRef.current,
-        });
-
-        const loadImage = (base64) => {
+        const loadImage = (base64: string): Promise<HTMLImageElement> => {
             return new Promise((resolve, reject) => {
                 const img = new Image();
                 img.onload = () => resolve(img);
@@ -612,11 +596,41 @@ const App = () => {
         };
 
         const imageElements = await Promise.all(generatedFrames.map(loadImage));
+
+        if (imageElements.length === 0) {
+            setIsGeneratingGif(false);
+            return;
+        }
+
+        // Get dimensions from the first frame to ensure the GIF canvas is sized correctly.
+        const firstImage = imageElements[0];
+        const { naturalWidth: width, naturalHeight: height } = firstImage;
         
-        const frameDelay = 1000 / gifFps; // Delay in ms, based on selected FPS
-        imageElements.forEach(img => {
-            gif.addFrame(img, { delay: frameDelay });
+        // Create a canvas to normalize frame dimensions and avoid sizing issues.
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+            throw new Error("Could not create canvas context to generate GIF.");
+        }
+
+        const gif = new GIF({
+            workers: 2,
+            quality: 10,
+            workerScript: gifWorkerUrlRef.current,
+            width,
+            height,
         });
+
+        const frameDelay = 1000 / gifFps; // Delay in ms, based on selected FPS
+        
+        // Draw each image onto the canvas before adding it to the GIF.
+        for (const img of imageElements) {
+            ctx.drawImage(img, 0, 0, width, height);
+            // Add the canvas context's data, copying it for each frame.
+            gif.addFrame(ctx, { copy: true, delay: frameDelay });
+        }
 
         gif.on('progress', (p) => {
             setGifProgress(Math.round(p * 100));
