@@ -3,7 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { GoogleGenAI, Modality, Type } from "@google/genai";
 
 const API_KEY = process.env.API_KEY;
-const NUM_FRAMES_TO_GENERATE = 6;
+const NUM_FRAMES_TO_GENERATE = 16;
 
 // Declare gif.js as a global variable for TypeScript
 declare var GIF: any;
